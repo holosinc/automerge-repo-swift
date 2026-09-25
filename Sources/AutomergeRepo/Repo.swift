@@ -921,7 +921,25 @@ public final class Repo {
                             Logger.resolver.trace("RESOLVE: :: \(id) -> [\(String(describing: handle.state))]")
                             Logger.resolver.trace("RESOLVE: :: starting remote fetch")
                         }
-                        try await network.startRemoteFetch(id: handle.id)
+                        do {
+                            try await network.startRemoteFetch(id: handle.id)
+                        } catch {
+                            // The handle was marked .requesting above, before
+                            // anyone was asked. When the fetch cannot even be
+                            // attempted — no peers, most commonly — throwing
+                            // from here used to leave it in that state for the
+                            // life of the process. documentIds() counts
+                            // .requesting handles, so addPeerWithMetadata
+                            // would later walk every one of them and wait out
+                            // the full resolve budget on each, serially,
+                            // inside the .ready delegate call that runs before
+                            // the socket's read loop starts. Nothing could
+                            // answer, and the handshake never returned.
+                            await markDocUnavailable(id: id)
+                            Logger.resolver
+                                .error("RESOLVE: :: \(id) remote fetch could not start -> [UNAVAILABLE]")
+                            throw error
+                        }
                         if loglevel.canTrace() {
                             Logger.resolver.trace("RESOLVE: :: continuing to resolve")
                         }
