@@ -328,6 +328,17 @@ public final class Repo {
         if logLevel(.repo).canTrace() {
             Logger.repo.trace("REPO: \(self.peerId) adding peer \(peer)")
         }
+        // A sync state assumes reliable, in-order delivery: it records a
+        // message as sent before the transport takes it, and the protocol
+        // sends nothing more for that document until the peer replies. A
+        // message sent while the connection was down is dropped, so that
+        // reply never comes and the document stays silent to this peer for
+        // the life of the process, reconnects included. A new connection
+        // can't rely on anything in flight on the old one, so reset each
+        // state (Automerge keeps what the peer is known to have).
+        for handle in handles.values {
+            handle.syncStates[peer]?.reset()
+        }
         for docId in documentIds() {
             await beginSync(docId: docId, to: peer)
         }
