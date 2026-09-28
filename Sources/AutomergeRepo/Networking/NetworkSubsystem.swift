@@ -226,8 +226,14 @@ extension NetworkSubsystem: NetworkEventReceiver {
                         requestedDocuments[docId] = stillPending
                     }
                 } else {
-                    // no peers are waiting to hear about a requested document, ignore
-                    return
+                    // Not a document we asked for, so this answers a sync we
+                    // sent: the peer refused it (a share policy, or a server
+                    // authorization check). Nothing waits on a request, but
+                    // the sync state for that peer still records our changes
+                    // as sent, and the sync protocol will not send them again
+                    // until the peer replies, which it never will. Forget it,
+                    // so the next sync to that peer starts over.
+                    await repo.peerReportedUnavailable(id: docId, peer: unavailableMsg.senderId)
                 }
             case let .ephemeral(ephemeralMsg):
                 Logger.network

@@ -745,6 +745,24 @@ public final class Repo {
         }
     }
 
+    /// A peer answered a sync of a document we hold with "unavailable": it
+    /// refused the document rather than taking our changes.
+    ///
+    /// The sync state records what was sent to a peer, and the protocol does
+    /// not send it again until that peer replies. A refusal is not a reply, so
+    /// without this the refused changes would count as delivered for the life
+    /// of the process: a later edit, a re-import or a reconnect sends nothing
+    /// the peer lacks, and only a relaunch (sync states are held in memory)
+    /// clears it. Dropping the state makes the next sync a fresh handshake,
+    /// which sends everything once the peer accepts the document.
+    func peerReportedUnavailable(id: DocumentId, peer: PEER_ID) {
+        guard let handle = handles[id], handle.state == .ready,
+              handle.syncStates.removeValue(forKey: peer) != nil else { return }
+        if logLevel(.repo).canTrace() {
+            Logger.repo.trace("REPO: \(peer) refused \(id); its sync state is reset")
+        }
+    }
+
     func updateSyncState(id: DocumentId, peer: PEER_ID, syncState: SyncState) async {
         guard let handle = handles[id] else {
             fatalError("No stored dochandle for id: \(id)")
