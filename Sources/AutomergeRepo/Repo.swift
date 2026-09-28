@@ -477,7 +477,8 @@ public final class Repo {
                 )
             return
         }
-        if let internalHandle = handles[docId], internalHandle.state != .deleted {
+        if let internalHandle = handles[docId], internalHandle.state != .deleted,
+           await holdsDocument(internalHandle) {
             // If we have the document, see if we're agreeable to sending a copy
             if await sharePolicy.share(peer: msg.senderId, docId: docId) {
                 do {
@@ -500,9 +501,19 @@ public final class Repo {
                     } // else no sync is needed, syncstate reports that they have everything they need
                     syncRequestPublisher.send(SyncRequest(id: docId, peer: msg.senderId))
                 } catch {
-                    let err: SyncV1Msg =
-                        .error(.init(message: "Unable to resolve document: \(error.localizedDescription)"))
-                    await network.send(message: err, to: msg.senderId)
+                    // The requester waits on an answer, and an error message
+                    // isn't one: automerge-repo ignores it and keeps the
+                    // request open. Not having the document is the answer.
+                    Logger.repo
+                        .warning(
+                            "REPO: Unable to resolve \(docId) for \(msg.senderId): \(error.localizedDescription, privacy: .public)"
+                        )
+                    let nope = SyncV1Msg.UnavailableMsg(
+                        documentId: msg.documentId,
+                        senderId: peerId,
+                        targetId: msg.senderId
+                    )
+                    await network.send(message: .unavailable(nope), to: msg.senderId)
                 }
             } else {
                 let nope = SyncV1Msg.UnavailableMsg(
@@ -520,6 +531,25 @@ public final class Repo {
                 targetId: msg.senderId
             )
             await network.send(message: .unavailable(nope), to: msg.senderId)
+        }
+    }
+
+    /// Whether this repo can answer a peer's request for a document from what
+    /// it holds, without asking anyone else.
+    ///
+    /// A handle can exist with no content: one this repo requested and was
+    /// told is unavailable, or is still requesting. Resolving it to answer a
+    /// peer would start a fetch of its own (or throw), and meanwhile the
+    /// peer gets no answer. A sync server asking on behalf of another client
+    /// answers that client only once every peer it asked has, so the
+    /// client's request stays open for good. Answer those with unavailable.
+    private func holdsDocument(_ handle: InternalDocHandle) async -> Bool {
+        if handle.doc != nil { return true }
+        switch handle.state {
+        case .requesting, .unavailable, .deleted:
+            return false
+        case .idle, .loading, .ready:
+            return (try? await loadFromStorage(id: handle.id)) != nil
         }
     }
 
