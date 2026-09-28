@@ -543,8 +543,13 @@ public final class Repo {
     /// peer gets no answer. A sync server asking on behalf of another client
     /// answers that client only once every peer it asked has, so the
     /// client's request stays open for good. Answer those with unavailable.
+    ///
+    /// A document with no changes counts as not held. A sync message from a
+    /// peer that lacks the document too still readies the handle, with an
+    /// empty document, and answering from that told the server nothing: it
+    /// kept waiting on this repo, and so did the client that asked it.
     private func holdsDocument(_ handle: InternalDocHandle) async -> Bool {
-        if handle.doc != nil { return true }
+        if let doc = handle.doc { return !doc.heads().isEmpty }
         switch handle.state {
         case .requesting, .unavailable, .deleted:
             return false

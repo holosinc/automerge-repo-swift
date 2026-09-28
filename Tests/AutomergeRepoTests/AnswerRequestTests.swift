@@ -53,4 +53,39 @@ final class AnswerRequestTests: XCTestCase {
         XCTAssertEqual(answer.documentId, id.description)
         XCTAssertEqual(answer.targetId, server)
     }
+
+    /// The same, for a document an empty sync message readied.
+    ///
+    /// This repo asks the server for a document nobody has, and the server
+    /// answers with a sync message from its own empty copy. That readies the
+    /// handle with an empty document. When the server is then asked for the
+    /// document by another client, it asks this repo, which must say it
+    /// doesn't have it rather than send another empty sync.
+    func testRequestForDocumentReadiedEmptyIsAnsweredUnavailable() async throws {
+        let repo = Repo(sharePolicy: SharePolicy.agreeable)
+        let adapter = await TestOutgoingNetworkProvider()
+        await repo.addNetworkAdapter(adapter: adapter)
+        let server: PEER_ID = "sync-server"
+        await adapter.configure(.init(remotePeer: server, remotePeerMetadata: nil) { _ in
+            .error(.init(message: "no answer"))
+        })
+        try await adapter.connect(to: "server")
+
+        let id = DocumentId()
+        let empty = Document().generateSyncMessage(state: SyncState()) ?? Data()
+        await repo.handleSync(msg: .init(
+            documentId: id.description, senderId: server, targetId: repo.peerId, sync_message: empty
+        ))
+
+        let before = await adapter.messagesReceivedByRemotePeer().count
+        await repo.handleRequest(msg: .init(
+            documentId: id.description, senderId: server, targetId: repo.peerId, sync_message: empty
+        ))
+
+        let replies = await adapter.messagesReceivedByRemotePeer().dropFirst(before)
+        XCTAssertEqual(replies.count, 1, "exactly one answer")
+        guard case .unavailable = replies.first else {
+            return XCTFail("expected unavailable, got \(String(describing: replies.first))")
+        }
+    }
 }
