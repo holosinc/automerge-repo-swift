@@ -328,6 +328,17 @@ public final class Repo {
         if logLevel(.repo).canTrace() {
             Logger.repo.trace("REPO: \(self.peerId) adding peer \(peer)")
         }
+        // A sync state assumes reliable, in-order delivery: it records a
+        // message as sent before the transport takes it, and the protocol
+        // sends nothing more for that document until the peer replies. A
+        // message sent while the connection was down is dropped, so that
+        // reply never comes and the document stays silent to this peer for
+        // the life of the process, reconnects included. A new connection
+        // can't rely on anything in flight on the old one, so reset each
+        // state (Automerge keeps what the peer is known to have).
+        for handle in handles.values {
+            handle.syncStates[peer]?.reset()
+        }
         for docId in documentIds() {
             await beginSync(docId: docId, to: peer)
         }
@@ -466,7 +477,8 @@ public final class Repo {
                 )
             return
         }
-        if let internalHandle = handles[docId], internalHandle.state != .deleted {
+        if let internalHandle = handles[docId], internalHandle.state != .deleted,
+           await holdsDocument(internalHandle) {
             // If we have the document, see if we're agreeable to sending a copy
             if await sharePolicy.share(peer: msg.senderId, docId: docId) {
                 do {
@@ -489,9 +501,19 @@ public final class Repo {
                     } // else no sync is needed, syncstate reports that they have everything they need
                     syncRequestPublisher.send(SyncRequest(id: docId, peer: msg.senderId))
                 } catch {
-                    let err: SyncV1Msg =
-                        .error(.init(message: "Unable to resolve document: \(error.localizedDescription)"))
-                    await network.send(message: err, to: msg.senderId)
+                    // The requester waits on an answer, and an error message
+                    // isn't one: automerge-repo ignores it and keeps the
+                    // request open. Not having the document is the answer.
+                    Logger.repo
+                        .warning(
+                            "REPO: Unable to resolve \(docId) for \(msg.senderId): \(error.localizedDescription, privacy: .public)"
+                        )
+                    let nope = SyncV1Msg.UnavailableMsg(
+                        documentId: msg.documentId,
+                        senderId: peerId,
+                        targetId: msg.senderId
+                    )
+                    await network.send(message: .unavailable(nope), to: msg.senderId)
                 }
             } else {
                 let nope = SyncV1Msg.UnavailableMsg(
@@ -509,6 +531,30 @@ public final class Repo {
                 targetId: msg.senderId
             )
             await network.send(message: .unavailable(nope), to: msg.senderId)
+        }
+    }
+
+    /// Whether this repo can answer a peer's request for a document from what
+    /// it holds, without asking anyone else.
+    ///
+    /// A handle can exist with no content: one this repo requested and was
+    /// told is unavailable, or is still requesting. Resolving it to answer a
+    /// peer would start a fetch of its own (or throw), and meanwhile the
+    /// peer gets no answer. A sync server asking on behalf of another client
+    /// answers that client only once every peer it asked has, so the
+    /// client's request stays open for good. Answer those with unavailable.
+    ///
+    /// A document with no changes counts as not held. A sync message from a
+    /// peer that lacks the document too still readies the handle, with an
+    /// empty document, and answering from that told the server nothing: it
+    /// kept waiting on this repo, and so did the client that asked it.
+    private func holdsDocument(_ handle: InternalDocHandle) async -> Bool {
+        if let doc = handle.doc { return !doc.heads().isEmpty }
+        switch handle.state {
+        case .requesting, .unavailable, .deleted:
+            return false
+        case .idle, .loading, .ready:
+            return (try? await loadFromStorage(id: handle.id)) != nil
         }
     }
 
@@ -745,6 +791,24 @@ public final class Repo {
         }
     }
 
+    /// A peer answered a sync of a document we hold with "unavailable": it
+    /// refused the document rather than taking our changes.
+    ///
+    /// The sync state records what was sent to a peer, and the protocol does
+    /// not send it again until that peer replies. A refusal is not a reply, so
+    /// without this the refused changes would count as delivered for the life
+    /// of the process: a later edit, a re-import or a reconnect sends nothing
+    /// the peer lacks, and only a relaunch (sync states are held in memory)
+    /// clears it. Dropping the state makes the next sync a fresh handshake,
+    /// which sends everything once the peer accepts the document.
+    func peerReportedUnavailable(id: DocumentId, peer: PEER_ID) {
+        guard let handle = handles[id], handle.state == .ready,
+              handle.syncStates.removeValue(forKey: peer) != nil else { return }
+        if logLevel(.repo).canTrace() {
+            Logger.repo.trace("REPO: \(peer) refused \(id); its sync state is reset")
+        }
+    }
+
     func updateSyncState(id: DocumentId, peer: PEER_ID, syncState: SyncState) async {
         guard let handle = handles[id] else {
             fatalError("No stored dochandle for id: \(id)")
@@ -921,7 +985,25 @@ public final class Repo {
                             Logger.resolver.trace("RESOLVE: :: \(id) -> [\(String(describing: handle.state))]")
                             Logger.resolver.trace("RESOLVE: :: starting remote fetch")
                         }
-                        try await network.startRemoteFetch(id: handle.id)
+                        do {
+                            try await network.startRemoteFetch(id: handle.id)
+                        } catch {
+                            // The handle was marked .requesting above, before
+                            // anyone was asked. When the fetch cannot even be
+                            // attempted — no peers, most commonly — throwing
+                            // from here used to leave it in that state for the
+                            // life of the process. documentIds() counts
+                            // .requesting handles, so addPeerWithMetadata
+                            // would later walk every one of them and wait out
+                            // the full resolve budget on each, serially,
+                            // inside the .ready delegate call that runs before
+                            // the socket's read loop starts. Nothing could
+                            // answer, and the handshake never returned.
+                            await markDocUnavailable(id: id)
+                            Logger.resolver
+                                .error("RESOLVE: :: \(id) remote fetch could not start -> [UNAVAILABLE]")
+                            throw error
+                        }
                         if loglevel.canTrace() {
                             Logger.resolver.trace("RESOLVE: :: continuing to resolve")
                         }

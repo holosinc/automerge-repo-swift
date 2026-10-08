@@ -226,14 +226,21 @@ extension NetworkSubsystem: NetworkEventReceiver {
                         requestedDocuments[docId] = stillPending
                     }
                 } else {
-                    // no peers are waiting to hear about a requested document, ignore
-                    return
+                    // Not a document we asked for, so this answers a sync we
+                    // sent: the peer refused it (a share policy, or a server
+                    // authorization check). Nothing waits on a request, but
+                    // the sync state for that peer still records our changes
+                    // as sent, and the sync protocol will not send them again
+                    // until the peer replies, which it never will. Forget it,
+                    // so the next sync to that peer starts over.
+                    await repo.peerReportedUnavailable(id: docId, peer: unavailableMsg.senderId)
                 }
             case let .ephemeral(ephemeralMsg):
-                Logger.network
-                    .error(
-                        "REPONET: UNIMPLEMENTED EPHEMERAL MESSAGE PASSING: \(ephemeralMsg.debugDescription, privacy: .public)"
-                    )
+                // Hand app-specific ephemeral messages (presence, carets, head
+                // and pinch ray — SPA-3874) to the repo's delegate. The sync
+                // server relays these untouched between peers of a document; the
+                // repo does not interpret them, it forwards the decoded payload.
+                await repo.handleEphemeralMessage(ephemeralMsg)
             case let .remoteSubscriptionChange(remoteSubscriptionChangeMsg):
                 Logger.network
                     .error(
