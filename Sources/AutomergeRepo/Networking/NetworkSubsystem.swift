@@ -236,10 +236,11 @@ extension NetworkSubsystem: NetworkEventReceiver {
                     await repo.peerReportedUnavailable(id: docId, peer: unavailableMsg.senderId)
                 }
             case let .ephemeral(ephemeralMsg):
-                Logger.network
-                    .error(
-                        "REPONET: UNIMPLEMENTED EPHEMERAL MESSAGE PASSING: \(ephemeralMsg.debugDescription, privacy: .public)"
-                    )
+                // Hand app-specific ephemeral messages (presence, carets, head
+                // and pinch ray — SPA-3874) to the repo's delegate. The sync
+                // server relays these untouched between peers of a document; the
+                // repo does not interpret them, it forwards the decoded payload.
+                await repo.handleEphemeralMessage(ephemeralMsg)
             case let .remoteSubscriptionChange(remoteSubscriptionChangeMsg):
                 Logger.network
                     .error(
