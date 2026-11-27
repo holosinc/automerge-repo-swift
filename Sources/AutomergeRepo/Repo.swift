@@ -825,9 +825,22 @@ public final class Repo {
             Logger.repo.error("REPO: missing handle for documentId \(id.description) while attempt to mark unavailable")
             return
         }
-        assert(handle.state == .requesting)
+        // Only a document still being asked for becomes unavailable. A peer can answer
+        // "unavailable" for one this repo already holds: a sync server that stopped sharing it
+        // (the client reconnected as another organization) answers the request that was in flight.
+        // The document is still here, so leave it ready rather than stopping a Debug build on an
+        // assertion and marking held content unavailable in a Release one (SPA-3985).
+        guard handle.state == .requesting else {
+            Logger.repo.notice("REPO: ignoring unavailable for documentId \(id.description) in state \(String(describing: handle.state))")
+            return
+        }
         handle.state = .unavailable
         docHandlePublisher.send(handle.snapshot())
+    }
+
+    /// The state of the handle for a document, if this repo has one.
+    func handleState(id: DocumentId) -> InternalDocHandle.DocHandleState? {
+        handles[id]?.state
     }
 
     func updateDoc(id: DocumentId, doc: Document) async {
